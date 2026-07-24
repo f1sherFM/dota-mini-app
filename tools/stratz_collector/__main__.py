@@ -14,7 +14,7 @@ from pathlib import Path
 from .aggregate import DataShapeError, aggregate_weeks, parse_week, to_jsonable
 from .client import StratzClient, StratzRequestError
 from .queries import MATCHUP_QUERY, STATS_QUERY
-from .validate import load_legacy_file, validate_against_reference
+from .validate import ValidationReport, load_legacy_file, validate_against_reference
 from .weeks import completed_weeks_from_stats
 
 logger = logging.getLogger(__name__)
@@ -43,16 +43,27 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def _collect(args: argparse.Namespace) -> None:
-    token = os.environ.get(args.token_env, "").strip()
+async def collect_matchups(
+    *,
+    token: str,
+    reference_path: Path,
+    output_path: Path,
+    weeks_count: int = 3,
+    endpoint: str = "https://api.stratz.com/graphql",
+    attempts: int = 5,
+    request_delay: float = 0.8,
+    max_total_match_delta: float = 0.25,
+) -> ValidationReport:
+    """Collect, validate, and atomically save the legacy matchups dataset."""
+    token = token.strip()
     if not token:
-        raise DataShapeError(f"environment variable {args.token_env} is not set")
-    reference = load_legacy_file(args.reference)
-    client = StratzClient(token, endpoint=args.endpoint, attempts=args.attempts)
+        raise DataShapeError("STRATZ token is not set")
+    reference = load_legacy_file(reference_path)
+    client = StratzClient(token, endpoint=endpoint, attempts=attempts)
 
     stats = await client.execute({"query": STATS_QUERY, "variables": {}})
     try:
-        weeks = completed_weeks_from_stats(stats["data"]["heroStats"]["stats"], args.weeks)
+        weeks = completed_weeks_from_stats(stats["data"]["heroStats"]["stats"], weeks_count)
     except (KeyError, TypeError) as exc:
         raise DataShapeError("STRATZ stats response has an unexpected shape") from exc
 
@@ -60,7 +71,7 @@ async def _collect(args: argparse.Namespace) -> None:
     hero_ids = reference.keys()
     for index, week in enumerate(weeks):
         if index:
-            await asyncio.sleep(args.request_delay)
+            await asyncio.sleep(request_delay)
         logger.info("collecting %s (STRATZ week %d): %d/%d", week.date, week.number,
                     index + 1, len(weeks))
         matchup = await client.execute({
@@ -75,9 +86,26 @@ async def _collect(args: argparse.Namespace) -> None:
 
     candidate = aggregate_weeks(weekly_data, hero_ids)
     report = validate_against_reference(
-        candidate, reference, max_total_match_delta=args.max_total_match_delta
+        candidate, reference, max_total_match_delta=max_total_match_delta
     )
-    _atomic_json_write(args.output, to_jsonable(candidate))
+    _atomic_json_write(output_path, to_jsonable(candidate))
+    return report
+
+
+async def _collect(args: argparse.Namespace) -> None:
+    token = os.environ.get(args.token_env, "").strip()
+    if not token:
+        raise DataShapeError(f"environment variable {args.token_env} is not set")
+    report = await collect_matchups(
+        token=token,
+        reference_path=args.reference,
+        output_path=args.output,
+        weeks_count=args.weeks,
+        endpoint=args.endpoint,
+        attempts=args.attempts,
+        request_delay=args.request_delay,
+        max_total_match_delta=args.max_total_match_delta,
+    )
     logger.info(
         "saved %s: heroes=%d pairs=%d total_matchCount=%d low_samples=%d asymmetric=%d",
         args.output, report.hero_count, report.pair_count, report.total_matches,
