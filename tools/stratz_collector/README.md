@@ -47,19 +47,19 @@ export STRATZ_API_TOKEN="..."
 ```powershell
 python -m tools.stratz_collector `
   --reference .\hero_matchups.json `
-  --output .\hero_matchups.new.json
+  --output .\.runtime\stratz\hero_matchups.new.json
 ```
 
 Если проверка не проходит, команда завершится с кодом `1`, а исходный и
 выходной рабочий файлы не будут заменены. После ручной проверки можно загрузить
-`hero_matchups.new.json` на staging прежним процессом.
+`.runtime/stratz/hero_matchups.new.json` на staging прежним процессом.
 
 На macOS команда запуска выглядит так:
 
 ```bash
 python -m tools.stratz_collector \
   --reference ./hero_matchups.json \
-  --output ./hero_matchups.new.json
+  --output ./.runtime/stratz/hero_matchups.new.json
 ```
 
 ## Тесты
