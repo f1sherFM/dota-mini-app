@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from math import isfinite
 from pathlib import Path
 from typing import Any
@@ -52,7 +52,9 @@ def _non_negative_int(value: Any, *, field: str, hero_id: int) -> int:
     return parsed
 
 
-def normalize_stats(rows: Any) -> tuple[list[dict[str, int]], list[dict[str, Any]]]:
+def normalize_stats(
+    rows: Any, *, expected_hero_ids: Collection[str] | None = None
+) -> tuple[list[dict[str, int]], list[dict[str, Any]]]:
     """Validate STRATZ response and derive compact plus detailed datasets."""
     if not isinstance(rows, list) or not rows:
         raise DataShapeError("STRATZ returned no hero statistics")
@@ -99,6 +101,15 @@ def normalize_stats(rows: Any) -> tuple[list[dict[str, int]], list[dict[str, Any
         detailed.append(row)
     if not popularity:
         raise DataShapeError("STRATZ returned no playable heroes")
+    if expected_hero_ids is not None:
+        expected = {int(hero_id) for hero_id in expected_hero_ids}
+        if seen != expected:
+            missing = sorted(expected - seen)
+            extra = sorted(seen - expected)
+            raise DataShapeError(
+                "STRATZ hero statistic set differs from reference; "
+                f"missing={missing}, extra={extra}"
+            )
     popularity.sort(key=lambda row: row["heroId"])
     detailed.sort(key=lambda row: row["heroId"])
     return popularity, detailed
@@ -111,6 +122,7 @@ async def collect_hero_stats(
     detailed_output: Path,
     endpoint: str = "https://api.stratz.com/graphql",
     attempts: int = 5,
+    expected_hero_ids: Collection[str] | None = None,
 ) -> dict[str, int]:
     """Fetch STRATZ once and write both mini-game data files atomically."""
     client = StratzClient(token.strip(), endpoint=endpoint, attempts=attempts)
@@ -119,7 +131,7 @@ async def collect_hero_stats(
         rows = response["data"]["heroStats"]["stats"]
     except (KeyError, TypeError) as exc:
         raise DataShapeError("STRATZ hero statistics response has an unexpected shape") from exc
-    popularity, detailed = normalize_stats(rows)
+    popularity, detailed = normalize_stats(rows, expected_hero_ids=expected_hero_ids)
     _atomic_json_write(popularity_output, popularity)
     _atomic_json_write(detailed_output, detailed)
     return {

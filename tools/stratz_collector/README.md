@@ -22,8 +22,8 @@
 Нужен Python 3.12.3 и отдельное окружение:
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+py -3.12 -m venv .runtime\stratz-venv
+.\.runtime\stratz-venv\Scripts\Activate.ps1
 pip install -r tools\stratz_collector\requirements.txt
 $env:STRATZ_API_TOKEN = "..."
 ```
@@ -33,8 +33,8 @@ $env:STRATZ_API_TOKEN = "..."
 ### macOS
 
 ```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
+python3.12 -m venv .runtime/stratz-venv
+source .runtime/stratz-venv/bin/activate
 python -m pip install -r tools/stratz_collector/requirements.txt
 export STRATZ_API_TOKEN="..."
 ```
@@ -46,7 +46,7 @@ export STRATZ_API_TOKEN="..."
 
 ```powershell
 python -m tools.stratz_collector `
-  --reference .\hero_matchups.json `
+  --reference .\.runtime\stratz\hero_matchups.json `
   --output .\.runtime\stratz\hero_matchups.new.json
 ```
 
@@ -58,7 +58,7 @@ python -m tools.stratz_collector `
 
 ```bash
 python -m tools.stratz_collector \
-  --reference ./hero_matchups.json \
+  --reference ./.runtime/stratz/hero_matchups.json \
   --output ./.runtime/stratz/hero_matchups.new.json
 ```
 

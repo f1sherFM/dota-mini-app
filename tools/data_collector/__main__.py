@@ -15,7 +15,7 @@ from tools.stratz_collector.__main__ import collect_matchups
 from tools.stratz_collector.aggregate import DataShapeError
 from tools.stratz_collector.client import StratzRequestError
 
-from .d2pt import import_d2pt_builds
+from .d2pt import HERO_IDS, import_d2pt_builds
 from .stratz_stats import collect_hero_stats
 
 
@@ -50,6 +50,8 @@ async def _collect(args: argparse.Namespace) -> dict:
     root = args.project_root.resolve()
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    matchups_reference = root / ".runtime" / "stratz" / "hero_matchups.json"
+    d2pt_reference = root / "dota_builds.json"
 
     stats = await collect_hero_stats(
         token=token,
@@ -57,10 +59,11 @@ async def _collect(args: argparse.Namespace) -> dict:
         detailed_output=output_dir / "hero_detailed_stats.new.json",
         endpoint=args.endpoint,
         attempts=args.attempts,
+        expected_hero_ids=HERO_IDS,
     )
     matchups = await collect_matchups(
         token=token,
-        reference_path=root / "hero_matchups.json",
+        reference_path=matchups_reference,
         output_path=output_dir / "hero_matchups.new.json",
         endpoint=args.endpoint,
         attempts=args.attempts,
@@ -68,6 +71,7 @@ async def _collect(args: argparse.Namespace) -> dict:
     )
     builds = import_d2pt_builds(
         source=args.d2pt_input,
+        reference=d2pt_reference,
         output=output_dir / "dota_builds.new.json",
     )
     return {

@@ -16,13 +16,15 @@ staging и production команда не изменяет.
 Прямой запрос D2PT API из Python сейчас получает Cloudflare `403`. Поэтому
 первым запускается существующий браузерный скрипт D2PT: на странице сервиса он
 скачивает `dota_builds.json`. Этот файл передаётся общей команде через
-`--d2pt-input`; она проверит полный набор героев, поля сборок и согласованность
-win rate перед тем, как добавить его к результатам.
+`--d2pt-input`; она проверит полный набор героев, минимальное число заполненных
+героев и позиций, поля сборок, согласованность win rate и общий объём матчей
+относительно предыдущего `dota_builds.json` перед тем, как добавить его к
+результатам.
 
 ## macOS
 
 ```bash
-source .venv/bin/activate
+source .runtime/stratz-venv/bin/activate
 export STRATZ_API_TOKEN="..."
 python -m tools.data_collector \
   --project-root . \
@@ -32,3 +34,7 @@ python -m tools.data_collector \
 
 После успешной команды проверь `collection-report.json` и новые JSON-файлы.
 Публикация на staging и production остаётся отдельным ручным действием.
+
+Для запуска нужны две предыдущие проверенные версии: `.runtime/stratz/hero_matchups.json`
+для STRATZ и `dota_builds.json` в корне репозитория для D2PT. Они используются
+только как эталон проверки и не изменяются командой.

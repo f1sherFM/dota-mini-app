@@ -27,6 +27,9 @@ REQUIRED_FIELDS = (
     "num_matches", "num_wins", "win_rate", "abilities", "talents", "items_mid_late",
     "anchor_items", "sixslot", "neutral_stats", "starting_items", "anchor_build_matches",
 )
+MIN_POPULATED_HEROES = 100
+MIN_POPULATED_POSITIONS = 400
+MAX_TOTAL_MATCH_DELTA = 0.25
 
 
 def _integer(value: Any, *, field: str, hero_id: int, position: str) -> int:
@@ -53,6 +56,7 @@ def validate_builds(raw: Any) -> dict[str, dict[str, dict[str, Any]]]:
             f"extra={sorted(actual_ids - HERO_IDS)}"
         )
 
+    populated_heroes = 0
     populated_positions = 0
     result: dict[str, dict[str, dict[str, Any]]] = {}
     for hero_id in sorted(HERO_IDS):
@@ -83,24 +87,59 @@ def validate_builds(raw: Any) -> dict[str, dict[str, dict[str, Any]]]:
                 raise DataShapeError(f"win_rate for hero {hero_id}, {position} disagrees with wins")
             result[str(hero_id)][position] = dict(build)
             populated_positions += 1
-    if not populated_positions:
-        raise DataShapeError("D2PT export has no populated positions")
+        if result[str(hero_id)]:
+            populated_heroes += 1
+    if populated_heroes < MIN_POPULATED_HEROES:
+        raise DataShapeError(
+            "D2PT export has too few populated heroes: "
+            f"{populated_heroes} (minimum {MIN_POPULATED_HEROES})"
+        )
+    if populated_positions < MIN_POPULATED_POSITIONS:
+        raise DataShapeError(
+            "D2PT export has too few populated positions: "
+            f"{populated_positions} (minimum {MIN_POPULATED_POSITIONS})"
+        )
     return result
 
 
-def import_d2pt_builds(*, source: Path, output: Path) -> dict[str, int]:
+def _total_matches(builds: Mapping[str, Mapping[str, Mapping[str, Any]]]) -> int:
+    return sum(
+        int(build["num_matches"])
+        for positions in builds.values() for build in positions.values()
+    )
+
+
+def import_d2pt_builds(
+    *, source: Path, reference: Path, output: Path,
+    max_total_match_delta: float = MAX_TOTAL_MATCH_DELTA,
+) -> dict[str, int | float]:
     """Validate a browser-exported file and save it as a collector artifact."""
+    if not 0 <= max_total_match_delta < 1:
+        raise ValueError("max_total_match_delta must be in [0, 1)")
     try:
         raw = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise DataShapeError(f"cannot read D2PT export {source}: {exc}") from exc
+    try:
+        reference_raw = json.loads(reference.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DataShapeError(f"cannot read D2PT reference {reference}: {exc}") from exc
     builds = validate_builds(raw)
+    reference_builds = validate_builds(reference_raw)
+    total_matches = _total_matches(builds)
+    reference_matches = _total_matches(reference_builds)
+    if not reference_matches:
+        raise DataShapeError("D2PT reference has no matches")
+    total_match_delta = abs(total_matches - reference_matches) / reference_matches
+    if total_match_delta > max_total_match_delta:
+        raise DataShapeError(
+            "D2PT total num_matches differs from reference by "
+            f"{total_match_delta:.1%} (limit {max_total_match_delta:.1%})"
+        )
     _atomic_json_write(output, builds)
     return {
         "heroes": len(builds),
         "populated_positions": sum(len(positions) for positions in builds.values()),
-        "total_matches": sum(
-            int(build["num_matches"])
-            for positions in builds.values() for build in positions.values()
-        ),
+        "total_matches": total_matches,
+        "total_match_delta": total_match_delta,
     }

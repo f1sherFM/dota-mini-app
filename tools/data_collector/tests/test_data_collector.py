@@ -37,19 +37,52 @@ class StratzStatsTests(unittest.TestCase):
                 {"heroId": 1, "matchCount": 10, "winCount": 5},
             ])
 
+    def test_incomplete_hero_set_is_rejected(self):
+        with self.assertRaisesRegex(DataShapeError, "set differs"):
+            normalize_stats(
+                [{"heroId": 1, "matchCount": 10, "winCount": 5}],
+                expected_hero_ids={"1", "2"},
+            )
+
 
 class D2ptTests(unittest.TestCase):
     def test_browser_export_is_validated_and_copied(self):
         raw = {str(hero_id): {} for hero_id in HERO_IDS}
-        raw["1"]["pos%201"] = _build()
+        for hero_id in HERO_IDS:
+            for position in ("pos%201", "pos%202", "pos%203", "pos%204"):
+                raw[str(hero_id)][position] = _build()
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "dota_builds.json"
+            reference = Path(directory) / "reference.json"
             output = Path(directory) / "out.json"
             source.write_text(json.dumps(raw), encoding="utf-8")
-            report = import_d2pt_builds(source=source, output=output)
+            reference.write_text(json.dumps(raw), encoding="utf-8")
+            report = import_d2pt_builds(source=source, reference=reference, output=output)
             self.assertEqual(report["heroes"], len(HERO_IDS))
-            self.assertEqual(report["populated_positions"], 1)
+            self.assertEqual(report["populated_positions"], len(HERO_IDS) * 4)
             self.assertTrue(output.exists())
+
+    def test_almost_empty_browser_export_is_rejected(self):
+        raw = {str(hero_id): {} for hero_id in HERO_IDS}
+        raw["1"]["pos%201"] = _build()
+        with self.assertRaisesRegex(DataShapeError, "too few populated heroes"):
+            validate_builds(raw)
+
+    def test_match_volume_is_compared_with_reference(self):
+        reference = {str(hero_id): {} for hero_id in HERO_IDS}
+        candidate = {str(hero_id): {} for hero_id in HERO_IDS}
+        for hero_id in HERO_IDS:
+            for position in ("pos%201", "pos%202", "pos%203", "pos%204"):
+                reference[str(hero_id)][position] = _build()
+                candidate[str(hero_id)][position] = {**_build(), "num_matches": 1, "num_wins": 1, "win_rate": 1.0}
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "dota_builds.json"
+            reference_path = Path(directory) / "reference.json"
+            output = Path(directory) / "out.json"
+            source.write_text(json.dumps(candidate), encoding="utf-8")
+            reference_path.write_text(json.dumps(reference), encoding="utf-8")
+            with self.assertRaisesRegex(DataShapeError, "total num_matches differs"):
+                import_d2pt_builds(source=source, reference=reference_path, output=output)
 
     def test_invalid_win_rate_is_rejected(self):
         raw = {str(hero_id): {} for hero_id in HERO_IDS}
