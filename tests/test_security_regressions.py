@@ -1606,7 +1606,7 @@ class SourceBoundaryTests(unittest.TestCase):
         self.assertIn("role = _bt_require_role(battle, uid)", api_source)
         self.assertIn("role = _bt_require_role(battle, user_id)", api_source)
         self.assertIn("token=_token_digest(token_str)", (PROJECT_ROOT / "backend" / "db.py").read_text(encoding="utf-8"))
-        self.assertIn('script.js?v=326', html_source)
+        self.assertIn('script.js?v=327', html_source)
         self.assertIn('styles.css?v=258', html_source)
         self.assertNotIn("frozenset({556944111})", bot_source)
         self.assertNotIn("traceback.print_exc()", bot_source)

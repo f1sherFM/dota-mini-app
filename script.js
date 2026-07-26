@@ -8514,8 +8514,8 @@ var _analysisDataLoading = false;
 var _ANALYSIS_SYNERGY_PRIOR_MATCHES = 1000;
 
 // Параметры meta_bonus от per-position win_rate.
-// Применяется только к empty-board бейджу picker'а. Когда на доске уже есть
-// герои, порядок кандидатов обязан совпадать с pair-формулой backend.
+// Это отдельная подсказка режима «Анализ»: она применяется и к выбранным
+// героям, и к рекомендациям picker'а, но не входит в backend-счёт битв/тренировки.
 var _ANALYSIS_META_MIN_MATCHES = 200; // меньше — выборка не доверительная, бейдж = "—"
 var _ANALYSIS_META_CENTER = 0.5;       // нейтральный winrate (50%) — точка отсчёта
 var _ANALYSIS_META_SCALE  = 10;        // множитель отклонения от центра в score-единицы
@@ -9437,6 +9437,7 @@ function _computeAnalysisScore(heroId, sideOverride, slotIndexOverride) {
     if (!_analysisMatchups) return 0;
 
     var side = sideOverride || _analysisActiveSide;
+    var slotIdx = (slotIndexOverride != null) ? slotIndexOverride : _analysisActiveSlot;
     var allies  = (side === 'light') ? _analysisLight : _analysisDark;
     var enemies = (side === 'light') ? _analysisDark  : _analysisLight;
 
@@ -9453,6 +9454,18 @@ function _computeAnalysisScore(heroId, sideOverride, slotIndexOverride) {
         if (!eid) continue;
         var matchup = _analysisPairMatchup(heroId, eid);
         if (matchup != null) score += matchup;
+    }
+
+    // Позиционная мета — часть только интерактивного «Анализа». Благодаря
+    // slotIdx бонус остаётся тем же после переноса героя из picker'а в слот.
+    if (slotIdx >= 0 && slotIdx <= 4 && _analysisPopularity) {
+        var heroPop = _analysisPopularity[String(heroId)];
+        var posData = (heroPop && heroPop.positions)
+            ? heroPop.positions[String(slotIdx + 1)]
+            : null;
+        if (posData && (posData.matches || 0) >= _ANALYSIS_META_MIN_MATCHES && posData.win_rate != null) {
+            score += (posData.win_rate - _ANALYSIS_META_CENTER) * _ANALYSIS_META_SCALE;
+        }
     }
 
     return score;
@@ -9525,7 +9538,8 @@ function renderAnalysisSheetGrid() {
 
     // Ban mode — сортировка по глобальной популярности (most-played first).
     // Empty board + slot-context — по per-position win_rate.
-    // Иначе — по confidence-weighted synergy + антисимметричному matchup.
+    // Иначе — по позиционной мете + confidence-weighted synergy
+    // + антисимметричному matchup.
     // Во всех случаях: banned-герои выпадают в самый низ (только видны при поиске
     // в pick-режиме, не должны конкурировать за внимание с доступными пиками).
     var isBanMode = (_analysisPickerIntent === 'ban');
@@ -9623,7 +9637,7 @@ function _renderAnalysisPickCard(h, hasContext) {
     if (h.banned) {
         // no badge
     } else if (hasContext) {
-        // С контекстом — та же pair-арифметика, что использует backend.
+        // С контекстом — позиционная мета + pair-арифметика.
         var tone = h.score > 0.05 ? 'positive' : (h.score < -0.05 ? 'negative' : 'neutral');
         var sign = h.score > 0 ? '+' : (h.score < 0 ? '−' : '');
         var abs  = Math.abs(h.score).toFixed(1);

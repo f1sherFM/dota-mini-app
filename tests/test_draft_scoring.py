@@ -96,15 +96,29 @@ class MatchupTests(unittest.TestCase):
 
 
 class ScoringContractTests(unittest.TestCase):
-    def test_frontend_uses_the_same_prior_and_new_battles_are_v3(self):
+    def test_frontend_uses_same_prior_and_analysis_keeps_position_meta(self):
         project_root = Path(__file__).resolve().parents[1]
         script = (project_root / "script.js").read_text(encoding="utf-8")
-        api = (project_root / "backend" / "api.py").read_text(encoding="utf-8")
 
         self.assertIn(
             f"var _ANALYSIS_SYNERGY_PRIOR_MATCHES = {SYNERGY_PRIOR_MATCHES};",
             script,
         )
+        analysis_score = script.split(
+            "function _computeAnalysisScore(", 1
+        )[1].split(
+            "\nfunction onAnalysisSheetSearch()", 1
+        )[0]
+        self.assertIn(
+            "score += (posData.win_rate - _ANALYSIS_META_CENTER) * "
+            "_ANALYSIS_META_SCALE;",
+            analysis_score,
+        )
+
+    def test_new_battles_use_backend_scoring_v3(self):
+        project_root = Path(__file__).resolve().parents[1]
+        api = (project_root / "backend" / "api.py").read_text(encoding="utf-8")
+
         self.assertIn(
             '"scoring": {"v": 3, "synergy_max":',
             api,
