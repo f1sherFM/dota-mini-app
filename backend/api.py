@@ -159,6 +159,7 @@ from backend.avatar_store import avatar_path, public_avatar_url
 from backend.hero_portraits import get_hero_portrait_path
 from backend.ability_icons import get_ability_icon_path
 from backend.hero_catalog import hero_identity
+from backend.draft_scoring import antisymmetric_matchup, symmetric_synergy
 from backend.security_logging import configure_secure_logging
 from backend.telegram_auth import validate_telegram_init_data as _validate_telegram_init_data
 from backend.rate_limit import check_rate_limit
@@ -1784,9 +1785,9 @@ def compute_draft_score(ally_entries, enemy_entries, synergy_scale: float = 50.0
 
     synergy_scale — потолок синергия-компонента. Дефолт 50 (Тренировка,
     исторические лидерборды draft_results несопоставимы с другой шкалой).
-    Битва передаёт 25 (счёт v2, 2026-07-16): контрпик — главный навык,
-    синергия — второй план; ред-тим показал, что при равных весах заученная
-    связка с потолочной синергией фармит 97% поля вслепую.
+    Битва передаёт 25 (счёт v2+, с v3 синергия использует S1000): контрпик —
+    главный навык, синергия — второй план; ред-тим показал, что при равных
+    весах заученная связка с потолочной синергией фармит 97% поля вслепую.
     """
     matchups = _load_hero_matchups_file() or {}
 
@@ -1794,15 +1795,16 @@ def compute_draft_score(ally_entries, enemy_entries, synergy_scale: float = 50.0
     enemy_ids = [h.hero_id for h in enemy_entries]
 
     # ── Компонент 1: Синергия команды (0-50) — 10 пар союзников ─────────────
-    # Усредняем обе стороны, чтобы результат не зависел от порядка ввода героев:
-    # поле "with" асимметрично (дельта от базового WR у каждого героя своя).
+    # Усредняем обе стороны, чтобы результат не зависел от порядка ввода героев.
+    # Каждое directional-значение предварительно сжимается к нулю по matchCount:
+    # n/(n+1000). Так редкая пара с экстремальной оценкой не перевешивает
+    # надёжную пару на десятках тысяч матчей. Новые снимки STRATZ подхватываются
+    # автоматически: никаких списков героев или ручных порогов здесь нет.
     synergy_pairs: list[tuple[int, int, float]] = []
     for i in range(len(ally_ids)):
         for j in range(i + 1, len(ally_ids)):
             a, b = ally_ids[i], ally_ids[j]
-            v1 = (matchups.get(str(a)) or {}).get("with", {}).get(str(b), {}).get("synergy", 0.0)
-            v2 = (matchups.get(str(b)) or {}).get("with", {}).get(str(a), {}).get("synergy", 0.0)
-            val = (float(v1) + float(v2)) / 2
+            val = symmetric_synergy(matchups, a, b)
             synergy_pairs.append((a, b, val))
 
     avg_synergy = sum(v for _, _, v in synergy_pairs) / (len(synergy_pairs) or 1)
@@ -1820,9 +1822,7 @@ def compute_draft_score(ally_entries, enemy_entries, synergy_scale: float = 50.0
     matchup_pairs: list[tuple[int, int, float]] = []
     for a in ally_ids:
         for e in enemy_ids:
-            v_ae = (matchups.get(str(a)) or {}).get("vs", {}).get(str(e), {}).get("synergy", 0.0)
-            v_ea = (matchups.get(str(e)) or {}).get("vs", {}).get(str(a), {}).get("synergy", 0.0)
-            val = (float(v_ae) - float(v_ea)) / 2
+            val = antisymmetric_matchup(matchups, a, e)
             matchup_pairs.append((a, e, val))
 
     matchup_score = sum(v for _, _, v in matchup_pairs) / (len(matchup_pairs) or 1)
@@ -4929,8 +4929,9 @@ _BT_POS_SOFT_SHARE = 0.12
 _BT_POS_HARD_PENALTY = 12.0
 _BT_POS_SOFT_PENALTY = 5.0
 _BT_POS_LADDER = (1.0, 0.5, 0.25, 0.2, 0.15)
-# Шкала синергии битвы (счёт v2): контрпик (0-50) — главный навык, синергия —
-# второй план. Тренировка остаётся на 50 (сопоставимость лидерборда).
+# Шкала синергии битвы (счёт v3): контрпик (0-50) — главный навык, синергия —
+# второй план. v3 добавляет confidence-weighting S1000 к союзным парам.
+# Тренировка остаётся на 50 (сопоставимость лидерборда).
 _BT_SYNERGY_SCALE = 25.0
 
 # Последовательности ходов. Роли: 'F' — команда первого пика, 'S' — вторая.
@@ -5544,9 +5545,10 @@ def _bt_finalize(db: Session, battle: DBDraftBattle, now: datetime) -> None:
         # По-геройная расшифровка штрафа (лестница; сумма value = penalty).
         "penalty_items": {"host": host_pen_items, "guest": guest_pen_items},
         "final": {"host": host_final, "guest": guest_final},
-        # Метаданные шкал: фронт подписывает «/25», «/50» и отличает v2
-        # от старых битв (у тех есть result.meta и дробные компоненты).
-        "scoring": {"v": 2, "synergy_max": int(_BT_SYNERGY_SCALE), "matchup_max": 50},
+        # Метаданные шкал: фронт подписывает «/25», «/50». v3 означает
+        # confidence-weighted союзную синергию S1000; старые результаты
+        # остаются самодостаточными и не пересчитываются.
+        "scoring": {"v": 3, "synergy_max": int(_BT_SYNERGY_SCALE), "matchup_max": 50},
         # Раскладки вскрываются обоим только здесь, после финала.
         "positions": {"host": host_pos, "guest": guest_pos},
         # Диагностика прод-репортов: отличаем подтверждённую раскладку от
@@ -5744,11 +5746,6 @@ def _bt_bot_pos_pool() -> dict:
     return out
 
 
-def _bt_pair_val(matchups: dict, mapkey: str, a: int, b: int) -> float:
-    return float((matchups.get(str(a)) or {}).get(mapkey, {})
-                 .get(str(b), {}).get("synergy", 0.0))
-
-
 def _bt_bot_cand_value(matchups: dict, cand: int,
                        ally: list, enemy: list) -> float:
     """Ценность кандидата для бота: синергия с союзниками (симметризовано) +
@@ -5756,11 +5753,9 @@ def _bt_bot_cand_value(matchups: dict, cand: int,
     compute_draft_score, но инкрементально по уже сделанным пикам."""
     val = 0.0
     for a in ally:
-        val += (_bt_pair_val(matchups, "with", cand, a)
-                + _bt_pair_val(matchups, "with", a, cand)) / 2
+        val += symmetric_synergy(matchups, cand, a)
     for e in enemy:
-        val += (_bt_pair_val(matchups, "vs", cand, e)
-                - _bt_pair_val(matchups, "vs", e, cand)) / 2
+        val += antisymmetric_matchup(matchups, cand, e)
     return val
 
 

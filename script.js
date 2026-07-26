@@ -8508,10 +8508,14 @@ var _ANALYSIS_MAX_BANS = 10;
 var _analysisMatchups   = null;     // { "1": { vs: {...}, with: {...} }, ... }
 var _analysisPopularity = null;     // { "1": { total, positions: { "1": {matches, win_rate}, ... } }, ... }
 var _analysisDataLoading = false;
-var _ANALYSIS_MIN_MATCH_COUNT = 30; // ниже — слишком шумно, игнорируем
+// Та же S1000-поправка, что в backend/draft_scoring.py. Нельзя оставлять
+// рекомендации на сырой синергии: иначе picker советует один состав, а
+// /api/draft/evaluate и «Битва драфтов» оценивают другой.
+var _ANALYSIS_SYNERGY_PRIOR_MATCHES = 1000;
 
 // Параметры meta_bonus от per-position win_rate.
-// Применяется и в _computeAnalysisScore, и в empty-board бейдже picker'а.
+// Применяется только к empty-board бейджу picker'а. Когда на доске уже есть
+// герои, порядок кандидатов обязан совпадать с pair-формулой backend.
 var _ANALYSIS_META_MIN_MATCHES = 200; // меньше — выборка не доверительная, бейдж = "—"
 var _ANALYSIS_META_CENTER = 0.5;       // нейтральный winrate (50%) — точка отсчёта
 var _ANALYSIS_META_SCALE  = 10;        // множитель отклонения от центра в score-единицы
@@ -8795,29 +8799,53 @@ function _analysisSlotRoleLabel(slotIndex) {
     return 'слот ' + (slotIndex + 1);
 }
 
-/* Достаёт synergy-значение из matchups для пары (heroId → mapKey → otherId).
-   Возвращает null если запись отсутствует или matchCount ниже порога. */
-function _analysisGetPairValue(heroId, mapKey, otherId) {
+/* Сырая directional-запись пары. null означает, что источник не прислал пару. */
+function _analysisGetPairRecord(heroId, mapKey, otherId) {
     if (!_analysisMatchups) return null;
     var entry = _analysisMatchups[String(heroId)];
     if (!entry) return null;
     var map = entry[mapKey];
     if (!map) return null;
     var rec = map[String(otherId)];
-    if (!rec) return null;
-    if ((rec.matchCount || 0) < _ANALYSIS_MIN_MATCH_COUNT) return null;
-    return rec.synergy || 0;
+    return rec || null;
 }
 
-/* Симметричная синергия пары союзников: avg(with[a][b], with[b][a]),
-   если хоть одно значение есть. Совместимо с формулой из /api/draft/evaluate. */
+/* Безопасное числовое значение; повреждённый новый снимок нейтрален. */
+function _analysisFiniteNumber(value) {
+    var parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/* S1000 для одной directional-записи синергии: value × n/(n+1000). */
+function _analysisAdjustedSynergyRecord(rec) {
+    if (!rec) return null;
+    var value = _analysisFiniteNumber(rec.synergy);
+    var matches = Math.max(0, Math.floor(_analysisFiniteNumber(rec.matchCount)));
+    if (!matches) return 0;
+    return value * matches / (matches + _ANALYSIS_SYNERGY_PRIOR_MATCHES);
+}
+
+function _analysisRawPairValue(heroId, mapKey, otherId) {
+    var rec = _analysisGetPairRecord(heroId, mapKey, otherId);
+    return rec ? _analysisFiniteNumber(rec.synergy) : null;
+}
+
+/* Симметричная confidence-weighted синергия. Отсутствующее направление равно
+   нулю, как в backend; это не должно удваивать единственное найденное значение. */
 function _analysisPairSynergy(a, b) {
-    var v1 = _analysisGetPairValue(a, 'with', b);
-    var v2 = _analysisGetPairValue(b, 'with', a);
+    var v1 = _analysisAdjustedSynergyRecord(_analysisGetPairRecord(a, 'with', b));
+    var v2 = _analysisAdjustedSynergyRecord(_analysisGetPairRecord(b, 'with', a));
     if (v1 == null && v2 == null) return null;
-    if (v1 == null) return v2;
-    if (v2 == null) return v1;
-    return (v1 + v2) / 2;
+    return ((v1 == null ? 0 : v1) + (v2 == null ? 0 : v2)) / 2;
+}
+
+/* Антисимметричный matchup — буквально та же формула, что на backend.
+   MatchCount здесь пока не корректируем: эксперимент ALL1000 был избыточным. */
+function _analysisPairMatchup(a, b) {
+    var forward = _analysisRawPairValue(a, 'vs', b);
+    var reverse = _analysisRawPairValue(b, 'vs', a);
+    if (forward == null && reverse == null) return null;
+    return ((forward == null ? 0 : forward) - (reverse == null ? 0 : reverse)) / 2;
 }
 
 /* Возвращает все валидные пары синергии внутри стороны: [{a, b, value}]. */
@@ -8832,13 +8860,12 @@ function _analysisCollectSynergies(heroes) {
     return out;
 }
 
-/* Возвращает все валидные пары матчапов между сторонами с точки зрения
-   первой стороны (perspective): vs[perspective][other].synergy. */
+/* Возвращает антисимметричные пары матчапов с точки зрения первой стороны. */
 function _analysisCollectMatchups(perspective, other) {
     var out = [];
     for (var i = 0; i < perspective.length; i++) {
         for (var j = 0; j < other.length; j++) {
-            var v = _analysisGetPairValue(perspective[i], 'vs', other[j]);
+            var v = _analysisPairMatchup(perspective[i], other[j]);
             if (v != null) out.push({ self: perspective[i], opp: other[j], value: v });
         }
     }
@@ -8864,8 +8891,6 @@ function _renderAnalysisStats() {
     var darkVsLight = _analysisCollectMatchups(dark, light);
 
     // Тоталы = сумма net-contribution бейджей всех героев стороны.
-    // Итерируем 5-слотный массив с исходным индексом (нужен для meta_bonus
-    // в _computeAnalysisScore — учитывает win_rate на позиции слота).
     var lightTotal = 0;
     for (var li = 0; li < _analysisLight.length; li++) {
         var lid = _analysisLight[li];
@@ -9357,10 +9382,10 @@ function _renderHeroDetailSheet(heroId, side, slotIndex) {
     var enemies = enemiesArr.filter(Boolean);
 
     var alliesData = allies.map(function(id) {
-        return { id: id, value: _analysisGetPairValue(heroId, 'with', id) };
+        return { id: id, value: _analysisPairSynergy(heroId, id) };
     });
     var enemiesData = enemies.map(function(id) {
-        return { id: id, value: _analysisGetPairValue(heroId, 'vs', id) };
+        return { id: id, value: _analysisPairMatchup(heroId, id) };
     });
 
     // Сортировка: по убыванию |value|; пары без данных — в конец
@@ -9410,45 +9435,24 @@ function _renderHeroDetailRow(item) {
 
 function _computeAnalysisScore(heroId, sideOverride, slotIndexOverride) {
     if (!_analysisMatchups) return 0;
-    var entry = _analysisMatchups[String(heroId)];
-    if (!entry) return 0;
 
     var side = sideOverride || _analysisActiveSide;
-    var slotIdx = (slotIndexOverride != null) ? slotIndexOverride : _analysisActiveSlot;
     var allies  = (side === 'light') ? _analysisLight : _analysisDark;
     var enemies = (side === 'light') ? _analysisDark  : _analysisLight;
 
     var score = 0;
-    var withMap = entry['with'] || {};
     for (var i = 0; i < allies.length; i++) {
         var aid = allies[i];
         if (!aid || aid === heroId) continue;
-        var w = withMap[String(aid)];
-        if (w && (w.matchCount || 0) >= _ANALYSIS_MIN_MATCH_COUNT) {
-            score += w.synergy || 0;
-        }
+        var synergy = _analysisPairSynergy(heroId, aid);
+        if (synergy != null) score += synergy;
     }
-    var vsMap = entry['vs'] || {};
+
     for (var j = 0; j < enemies.length; j++) {
         var eid = enemies[j];
         if (!eid) continue;
-        var v = vsMap[String(eid)];
-        if (v && (v.matchCount || 0) >= _ANALYSIS_MIN_MATCH_COUNT) {
-            score += v.synergy || 0;
-        }
-    }
-
-    // Meta-bonus от per-position win_rate: герой, чей win_rate на этой позиции
-    // выше 50%, получает положительную добавку; ниже — отрицательную.
-    // Гейт по объёму выборки 200 матчей — иначе слишком шумно.
-    if (slotIdx >= 0 && slotIdx <= 4 && _analysisPopularity) {
-        var heroPop = _analysisPopularity[String(heroId)];
-        var posData = (heroPop && heroPop.positions)
-            ? heroPop.positions[String(slotIdx + 1)]
-            : null;
-        if (posData && (posData.matches || 0) >= _ANALYSIS_META_MIN_MATCHES && posData.win_rate != null) {
-            score += (posData.win_rate - _ANALYSIS_META_CENTER) * _ANALYSIS_META_SCALE;
-        }
+        var matchup = _analysisPairMatchup(heroId, eid);
+        if (matchup != null) score += matchup;
     }
 
     return score;
@@ -9521,7 +9525,7 @@ function renderAnalysisSheetGrid() {
 
     // Ban mode — сортировка по глобальной популярности (most-played first).
     // Empty board + slot-context — по per-position win_rate.
-    // Иначе — по score (включает meta_bonus от win_rate с гейтом ≥200).
+    // Иначе — по confidence-weighted synergy + антисимметричному matchup.
     // Во всех случаях: banned-герои выпадают в самый низ (только видны при поиске
     // в pick-режиме, не должны конкурировать за внимание с доступными пиками).
     var isBanMode = (_analysisPickerIntent === 'ban');
@@ -9619,7 +9623,7 @@ function _renderAnalysisPickCard(h, hasContext) {
     if (h.banned) {
         // no badge
     } else if (hasContext) {
-        // С контекстом — обычный score (synergy + matchup + meta_bonus)
+        // С контекстом — та же pair-арифметика, что использует backend.
         var tone = h.score > 0.05 ? 'positive' : (h.score < -0.05 ? 'negative' : 'neutral');
         var sign = h.score > 0 ? '+' : (h.score < 0 ? '−' : '');
         var abs  = Math.abs(h.score).toFixed(1);
