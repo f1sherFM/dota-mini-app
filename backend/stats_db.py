@@ -1511,9 +1511,18 @@ def get_teammate_stats() -> dict:
 # Analytics overview (для /analytics в боте)
 # ---------------------------------------------------------------------------
 
+_ANALYTICS_RETENTION_EVENTS = (
+    "battle_start",
+    "page_drafter",
+    "page_database",
+    "page_teammates",
+    "page_minigame_hl",
+)
+
+
 def get_analytics_overview(days: int = 7) -> dict:
     """Сводка по аналитике: DAU/новые/вернувшиеся по дням, использование по
-    фичам за окно `days` дней, retention D1/D7 по cohort'ам.
+    фичам за окно `days` дней, воронка битвы и retention D1/D7 по cohort'ам.
 
     Все даты считаем по UTC-суткам (day = [00:00 UTC, 24:00 UTC)). Это
     единообразно и не зависит от часового пояса сервера.
@@ -1561,7 +1570,12 @@ def get_analytics_overview(days: int = 7) -> dict:
             {"s": window_start, "e": window_end},
         ).all()
         features = [
-            {"event": r[0], "opens": r[1], "users": r[2]}
+            {
+                "event": r[0],
+                "opens": r[1],
+                "users": r[2],
+                "opens_per_user": round(r[1] / r[2], 2) if r[2] else 0.0,
+            }
             for r in feature_rows
         ]
 
@@ -1581,14 +1595,150 @@ def get_analytics_overview(days: int = 7) -> dict:
         # 4) Retention D1 / D7 — средние по cohort'ам.
         d1 = _retention_avg(conn, today_mid, lookback_days=14, gap=1)
         d7 = _retention_avg(conn, today_mid, lookback_days=21, gap=7)
+        feature_d1 = _feature_retention(
+            conn,
+            today_mid,
+            lookback_days=14,
+            gap=1,
+            events=_ANALYTICS_RETENTION_EVENTS,
+        )
+        feature_d7 = _feature_retention(
+            conn,
+            today_mid,
+            lookback_days=21,
+            gap=7,
+            events=_ANALYTICS_RETENTION_EVENTS,
+        )
 
     return {
-        "window_days":    days,
-        "daily":          daily,
-        "features":       features,
-        "support_clicks": support_clicks,
-        "retention_d1":   d1,
-        "retention_d7":   d7,
+        "window_days":       days,
+        "daily":             daily,
+        "features":          features,
+        "battle_funnel":     _battle_funnel(features),
+        "support_clicks":    support_clicks,
+        "retention_d1":      d1,
+        "retention_d7":      d7,
+        "feature_retention": [
+            {
+                "event": event,
+                "d1": feature_d1[event],
+                "d7": feature_d7[event],
+            }
+            for event in _ANALYTICS_RETENTION_EVENTS
+        ],
+    }
+
+
+def _percentage(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return round(100.0 * numerator / denominator, 1)
+
+
+def _battle_funnel(features: list[dict]) -> dict:
+    by_event = {row["event"]: row for row in features}
+
+    def _count(event: str, field: str) -> int:
+        return int((by_event.get(event) or {}).get(field) or 0)
+
+    queue_opens = _count("battle_queue", "opens")
+    start_opens = _count("battle_start", "opens")
+    finish_opens = _count("battle_finish", "opens")
+    afk_opens = _count("battle_afk", "opens")
+    forfeit_opens = _count("battle_forfeit", "opens")
+    return {
+        "steps": [
+            {
+                "event": event,
+                "opens": _count(event, "opens"),
+                "users": _count(event, "users"),
+            }
+            for event in (
+                "page_draft_battle",
+                "battle_queue",
+                "battle_start",
+                "battle_finish",
+            )
+        ],
+        "queue_to_start_pct": _percentage(start_opens, queue_opens),
+        "start_to_finish_pct": _percentage(finish_opens, start_opens),
+        "afk_per_start_pct": _percentage(afk_opens, start_opens),
+        "forfeit_per_start_pct": _percentage(forfeit_opens, start_opens),
+    }
+
+
+def _feature_retention(
+    conn,
+    today_mid: datetime,
+    *,
+    lookback_days: int,
+    gap: int,
+    events: tuple[str, ...],
+) -> dict[str, dict]:
+    """Return pooled retention for new users who adopted a feature on day 0.
+
+    Adoption = at least one matching event on the UTC registration day.
+    Retained = at least one event of any kind exactly `gap` UTC days later.
+    Percentages are pooled across eligible cohorts so tiny cohorts do not have
+    the same weight as large acquisition days.
+    """
+    totals = {
+        event: {"users": 0, "retained": 0, "cohorts": 0}
+        for event in events
+    }
+    event_params = {f"feature_{idx}": event for idx, event in enumerate(events)}
+    placeholders = ", ".join(f":feature_{idx}" for idx in range(len(events)))
+    horizon_end = today_mid + timedelta(days=1)
+
+    for offset in range(gap, gap + lookback_days):
+        cohort_start = today_mid - timedelta(days=offset)
+        cohort_end = cohort_start + timedelta(days=1)
+        ret_start = cohort_start + timedelta(days=gap)
+        ret_end = ret_start + timedelta(days=1)
+        if ret_end > horizon_end:
+            continue
+
+        params = {
+            **event_params,
+            "cohort_start": cohort_start,
+            "cohort_end": cohort_end,
+            "ret_start": ret_start,
+            "ret_end": ret_end,
+        }
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT adopted.event,
+                       COUNT(DISTINCT adopted.user_id) AS users,
+                       COUNT(DISTINCT returned.user_id) AS retained
+                FROM analytics_events adopted
+                JOIN user_profiles up ON up.user_id = adopted.user_id
+                LEFT JOIN analytics_events returned
+                  ON returned.user_id = adopted.user_id
+                 AND returned.created_at >= :ret_start
+                 AND returned.created_at < :ret_end
+                WHERE adopted.event IN ({placeholders})
+                  AND up.created_at >= :cohort_start
+                  AND up.created_at < :cohort_end
+                  AND adopted.created_at >= :cohort_start
+                  AND adopted.created_at < :cohort_end
+                GROUP BY adopted.event
+                """
+            ),
+            params,
+        ).all()
+        for event, users, retained in rows:
+            bucket = totals[event]
+            bucket["users"] += int(users or 0)
+            bucket["retained"] += int(retained or 0)
+            bucket["cohorts"] += 1
+
+    return {
+        event: {
+            **counts,
+            "pct": _percentage(counts["retained"], counts["users"]),
+        }
+        for event, counts in totals.items()
     }
 
 

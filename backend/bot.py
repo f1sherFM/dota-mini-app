@@ -129,6 +129,7 @@ from db import (
     log_event,
 )
 from avatar_store import delete_avatar, store_avatar_bytes
+from analytics_report import format_analytics_messages
 from security_logging import configure_secure_logging
 from stats_db import get_teammate_stats, get_analytics_overview
 
@@ -1647,37 +1648,6 @@ async def tm_stats_command(update: Update, _context: ContextTypes.DEFAULT_TYPE):
 
 # -------- /analytics (общая аналитика, только для администраторов) --------
 
-# Лейблы для имён событий — чтобы в дайджесте было читаемо, а не «page_drafter».
-_ANALYTICS_EVENT_LABELS = {
-    "bot_start":             "/start",
-    "bot_help":              "/help",
-    "bot_quiz_last":         "/last_quiz",
-    "bot_quiz_hero":         "/hero_quiz",
-    "bot_counters":          "/counters",
-    "bot_synergy":           "/synergy",
-    "bot_news":              "/news",
-    "bot_feedback":          "/feedback",
-    "page_home":             "Главная",
-    "page_drafter":          "Драфтер",
-    "page_quiz":             "Квизы",
-    "page_database":         "База героев",
-    "page_profile":          "Профиль",
-    "page_teammates":        "Пати",
-    "page_teammate_review":  "Экран отзыва",
-    "page_donate":           "Поддержка",
-    "page_feedback":         "Фидбек",
-    "page_news":             "Новости",
-    "support_click":         "Поддержать — кликов",
-    # Битва драфтов — воронка (battle_queue → battle_start → battle_finish).
-    "page_draft_battle":     "Битва драфтов — открыт экран",
-    "battle_queue":          "Битва — встал в очередь",
-    "battle_start":          "Битва — началась",
-    "battle_vs_bot":         "Битва — против бота",
-    "battle_finish":         "Битва — доиграна",
-    "battle_forfeit":        "Битва — сдался",
-}
-
-
 async def analytics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Сводка по активности и использованию — для админа. По умолчанию окно 7 дней;
     можно указать аргументом: /analytics 14."""
@@ -1701,44 +1671,8 @@ async def analytics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Не удалось получить аналитику.")
         return
 
-    # 1) Дневная разбивка
-    daily = a.get("daily", [])
-    total_dau = sum(d["dau"] for d in daily)
-    total_new = sum(d["new"] for d in daily)
-    avg_dau = round(total_dau / len(daily)) if daily else 0
-    daily_lines = "\n".join(
-        f"  • {d['day']} — DAU {d['dau']} (нов: {d['new']} · верн: {d['returning']})"
-        for d in daily
-    ) or "  • —"
-
-    # 2) Использование по фичам — сортировано по opens
-    feats = a.get("features", [])
-    feat_lines = "\n".join(
-        f"  • {_ANALYTICS_EVENT_LABELS.get(f['event'], f['event'])}: "
-        f"{f['opens']} откр · {f['users']} юзеров"
-        for f in feats
-    ) or "  • —"
-
-    # 3) Retention
-    d1 = a.get("retention_d1") or {}
-    d7 = a.get("retention_d7") or {}
-    def _ret_line(label, r):
-        pct = r.get("avg_pct")
-        cohorts = r.get("cohorts", 0)
-        if pct is None:
-            return f"  • {label}: — (нет данных)"
-        return f"  • {label}: {pct}% (по {cohorts} cohort'ам)"
-
-    await update.message.reply_text(
-        f"📊 Аналитика D2Helper (окно {days} дн.)\n\n"
-        f"📅 По дням:\n{daily_lines}\n\n"
-        f"📈 Итого за окно: новых {total_new} · средний DAU ≈ {avg_dau}\n\n"
-        f"💖 Поддержать — кликов: {a.get('support_clicks', 0)}\n\n"
-        f"🔧 Использование по фичам:\n{feat_lines}\n\n"
-        f"♻ Retention:\n"
-        f"{_ret_line('D1', d1)}\n"
-        f"{_ret_line('D7', d7)}"
-    )
+    for message in format_analytics_messages(a, days):
+        await update.message.reply_text(message)
 
 
 # -------- /topdraft (скрытая команда для администраторов) --------
