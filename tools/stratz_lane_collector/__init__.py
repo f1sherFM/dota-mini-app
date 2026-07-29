@@ -1,1 +1,1 @@
-"""Local STRATZ collector for position-aware lane outcomes."""
+"""Local STRATZ collector for safe, mid, and off lane outcomes."""

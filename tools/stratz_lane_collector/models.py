@@ -28,6 +28,6 @@ class LaneStat:
         self.cs_count += other.cs_count
 
 
-PositionPairs: TypeAlias = dict[str, dict[str, LaneStat]]
-LaneModeData: TypeAlias = dict[str, PositionPairs]
+HeroLanes: TypeAlias = dict[str, dict[str, LaneStat]]
+LaneModeData: TypeAlias = dict[str, HeroLanes]
 LaneData: TypeAlias = dict[str, LaneModeData]

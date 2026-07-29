@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 
 from tools.stratz_collector.aggregate import DataShapeError
 
+from .aggregate import LANES
 from .models import LaneData
 
 
@@ -22,6 +24,7 @@ def validate_lane_data(
     expected_hero_ids: set[str],
     *,
     low_sample_threshold: int = 500,
+    expected_lanes: Collection[str] = LANES,
 ) -> LaneValidationReport:
     """Reject partial responses before an artifact is written."""
     total_pairs = 0
@@ -37,15 +40,22 @@ def validate_lane_data(
                 f"{mode} hero set differs from reference; missing={missing}, extra={extra}"
             )
         heroes_seen.update(actual)
-        for positions in data[mode].values():
-            if not positions:
-                raise DataShapeError(f"{mode} contains a hero without positions")
-            for pairs in positions.values():
+        lanes_seen: set[str] = set()
+        for lanes in data[mode].values():
+            if not lanes:
+                raise DataShapeError(f"{mode} contains a hero without lanes")
+            lanes_seen.update(lanes)
+            for pairs in lanes.values():
                 for stat in pairs.values():
                     total_pairs += 1
                     total_matches += stat.match_count
                     if stat.match_count < low_sample_threshold:
                         low_samples += 1
+        missing_lanes = set(expected_lanes) - lanes_seen
+        if missing_lanes:
+            raise DataShapeError(
+                f"{mode} is missing requested lanes: {sorted(missing_lanes)}"
+            )
     if not total_pairs or not total_matches:
         raise DataShapeError("lane outcome dataset is empty")
     return LaneValidationReport(

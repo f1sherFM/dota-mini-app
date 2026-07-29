@@ -1,4 +1,4 @@
-"""CLI for collecting position-aware STRATZ lane outcomes locally."""
+"""CLI for collecting STRATZ safe, mid, and off lane outcomes locally."""
 
 from __future__ import annotations
 
@@ -18,9 +18,9 @@ from tools.stratz_collector.queries import STATS_QUERY
 from tools.stratz_collector.validate import load_legacy_file
 from tools.stratz_collector.weeks import completed_weeks_from_stats
 
-from .aggregate import POSITIONS, aggregate_snapshots, parse_rows, to_jsonable
+from .aggregate import aggregate_snapshots, parse_rows, to_jsonable
 from .models import LaneData
-from .queries import LANE_OUTCOME_QUERY
+from .queries import LANE_ALIASES, LANE_OUTCOME_QUERY
 from .validate import LaneValidationReport, validate_lane_data
 
 
@@ -109,14 +109,28 @@ async def collect_lane_outcomes(
                 "variables": {"week": week.timestamp, "isWith": is_with},
             })
             try:
-                rows = response["data"]["heroStats"]["laneOutcome"]
+                hero_stats = response["data"]["heroStats"]
             except (KeyError, TypeError) as exc:
                 raise DataShapeError(
                     f"STRATZ laneOutcome response has an unexpected shape for {mode}"
                 ) from exc
-            snapshot[mode] = parse_rows(
-                rows, hero_ids, description=f"{mode}, week {week.number}",
-            )
+            for alias, lane in LANE_ALIASES.items():
+                try:
+                    rows = hero_stats[alias]
+                except (KeyError, TypeError) as exc:
+                    raise DataShapeError(
+                        f"STRATZ laneOutcome response is missing {lane} for {mode}"
+                    ) from exc
+                parsed = parse_rows(
+                    rows,
+                    hero_ids,
+                    description=f"{mode}, {lane}, week {week.number}",
+                    lane=lane,
+                )
+                snapshot[mode] = aggregate_snapshots([
+                    {mode: snapshot[mode]},
+                    {mode: parsed},
+                ])[mode]
         snapshots.append(snapshot)
 
     candidate = aggregate_snapshots(snapshots)
@@ -130,7 +144,11 @@ async def collect_lane_outcomes(
                 {"number": week.number, "date": week.date}
                 for week in weeks
             ],
-            "positions": sorted(POSITIONS),
+            "lanes": {
+                "SAFE": ["POSITION_1", "POSITION_5"],
+                "MID": ["POSITION_2"],
+                "OFF": ["POSITION_3", "POSITION_4"],
+            },
             "rankBrackets": "all",
         },
         **to_jsonable(candidate),

@@ -10,9 +10,7 @@ from tools.stratz_collector.aggregate import DataShapeError
 from .models import LaneData, LaneModeData, LaneStat
 
 
-POSITIONS = frozenset({
-    "POSITION_1", "POSITION_2", "POSITION_3", "POSITION_4", "POSITION_5",
-})
+LANES = frozenset({"SAFE", "MID", "OFF"})
 COUNT_FIELDS = {
     "matchCount": "match_count",
     "drawCount": "draw_count",
@@ -67,14 +65,17 @@ def parse_rows(
     allowed_hero_ids: Iterable[str],
     *,
     description: str,
+    lane: str,
 ) -> LaneModeData:
     """Parse and combine one STRATZ laneOutcome response.
 
     STRATZ may return separate rows for rank brackets. They intentionally merge
-    into the same hero/position/pair entry when no rank filter is configured.
+    into the same hero/lane/pair entry when no rank filter is configured.
     """
     if not isinstance(rows, list) or not rows:
         raise DataShapeError(f"STRATZ returned no lane outcomes for {description}")
+    if lane not in LANES:
+        raise DataShapeError(f"unexpected lane {lane!r} for {description}")
     allowed = set(allowed_hero_ids)
     result: LaneModeData = {}
     for row in rows:
@@ -92,16 +93,11 @@ def parse_rows(
         target_id = _hero_id(raw_target_id, field="heroId2")
         if source_id not in allowed or target_id not in allowed or source_id == target_id:
             continue
-        position = row.get("position")
-        if position not in POSITIONS:
-            raise DataShapeError(
-                f"unexpected position {position!r} for {source_id}->{target_id}"
-            )
-        pair = f"{source_id}->{target_id}, {position}, {description}"
+        pair = f"{source_id}->{target_id}, {lane}, {description}"
         stat = _parse_stat(row, pair=pair)
         target = (
             result.setdefault(source_id, {})
-            .setdefault(position, {})
+            .setdefault(lane, {})
             .setdefault(target_id, LaneStat())
         )
         target.add(stat)
@@ -111,16 +107,16 @@ def parse_rows(
 
 
 def aggregate_snapshots(snapshots: Iterable[LaneData]) -> LaneData:
-    """Sum counters across completed weeks and rank-bracket rows."""
+    """Sum counters across completed weeks, lane groups, and rank rows."""
     result: LaneData = {"with": {}, "against": {}}
     for snapshot in snapshots:
         for mode in ("with", "against"):
-            for hero_id, positions in snapshot.get(mode, {}).items():
-                for position, pairs in positions.items():
+            for hero_id, lanes in snapshot.get(mode, {}).items():
+                for lane, pairs in lanes.items():
                     for other_id, stat in pairs.items():
                         target = (
                             result[mode].setdefault(hero_id, {})
-                            .setdefault(position, {})
+                            .setdefault(lane, {})
                             .setdefault(other_id, LaneStat())
                         )
                         target.add(stat)
@@ -131,7 +127,7 @@ def to_jsonable(data: LaneData) -> dict[str, dict]:
     def serialize_mode(mode: LaneModeData) -> dict[str, dict]:
         return {
             hero_id: {
-                position: {
+                lane: {
                     other_id: {
                         "matchCount": stat.match_count,
                         "drawCount": stat.draw_count,
@@ -144,9 +140,9 @@ def to_jsonable(data: LaneData) -> dict[str, dict]:
                     }
                     for other_id, stat in sorted(pairs.items(), key=lambda item: int(item[0]))
                 }
-                for position, pairs in sorted(positions.items())
+                for lane, pairs in sorted(lanes.items())
             }
-            for hero_id, positions in sorted(mode.items(), key=lambda item: int(item[0]))
+            for hero_id, lanes in sorted(mode.items(), key=lambda item: int(item[0]))
         }
 
     return {mode: serialize_mode(data[mode]) for mode in ("with", "against")}

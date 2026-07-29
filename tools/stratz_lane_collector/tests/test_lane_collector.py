@@ -8,6 +8,10 @@ from tools.stratz_lane_collector.aggregate import (
     parse_rows,
     to_jsonable,
 )
+from tools.stratz_lane_collector.queries import (
+    LANE_ALIASES,
+    LANE_OUTCOME_QUERY,
+)
 from tools.stratz_lane_collector.validate import validate_lane_data
 
 
@@ -25,7 +29,6 @@ def _row(
     return {
         "heroId1": hero1,
         "heroId2": hero2,
-        "position": "POSITION_1",
         "matchCount": matches,
         "drawCount": draws,
         "winCount": wins,
@@ -43,8 +46,9 @@ class ParseTests(unittest.TestCase):
             [_row(1, 2), _row(1, 2)],
             {"1", "2"},
             description="with, test",
+            lane="SAFE",
         )
-        stat = parsed["1"]["POSITION_1"]["2"]
+        stat = parsed["1"]["SAFE"]["2"]
         self.assertEqual(stat.match_count, 20)
         self.assertEqual(stat.win_count, 6)
         self.assertEqual(stat.cs_count, 800)
@@ -54,6 +58,7 @@ class ParseTests(unittest.TestCase):
             [_row(0, 2), _row(1, 2)],
             {"1", "2"},
             description="against, test",
+            lane="SAFE",
         )
         self.assertEqual(set(parsed), {"1"})
 
@@ -65,6 +70,7 @@ class ParseTests(unittest.TestCase):
                 [row],
                 {"1", "2"},
                 description="against, test",
+                lane="SAFE",
             )
 
     def test_outcome_counts_cannot_exceed_matches(self):
@@ -73,30 +79,61 @@ class ParseTests(unittest.TestCase):
                 [_row(1, 2, matches=2)],
                 {"1", "2"},
                 description="against, test",
+                lane="SAFE",
             )
+
+    def test_unknown_lane_is_rejected(self):
+        with self.assertRaisesRegex(DataShapeError, "unexpected lane"):
+            parse_rows(
+                [_row(1, 2)],
+                {"1", "2"},
+                description="against, test",
+                lane="JUNGLE",
+            )
+
+
+class QueryTests(unittest.TestCase):
+    def test_each_lane_has_a_separate_graphql_alias(self):
+        self.assertEqual(
+            LANE_ALIASES,
+            {"safe": "SAFE", "mid": "MID", "off": "OFF"},
+        )
+        for alias in LANE_ALIASES:
+            self.assertIn(f"{alias}: laneOutcome(", LANE_OUTCOME_QUERY)
+        self.assertIn("positionIds: [POSITION_1, POSITION_5]", LANE_OUTCOME_QUERY)
+        self.assertIn("positionIds: [POSITION_2]", LANE_OUTCOME_QUERY)
+        self.assertIn("positionIds: [POSITION_3, POSITION_4]", LANE_OUTCOME_QUERY)
+        self.assertNotIn("\n      position\n", LANE_OUTCOME_QUERY)
 
 
 class AggregationTests(unittest.TestCase):
     def test_completed_weeks_are_summed(self):
-        first = parse_rows([_row(1, 2)], {"1", "2"}, description="first")
-        second = parse_rows([_row(1, 2)], {"1", "2"}, description="second")
+        first = parse_rows(
+            [_row(1, 2)], {"1", "2"}, description="first", lane="SAFE",
+        )
+        second = parse_rows(
+            [_row(1, 2)], {"1", "2"}, description="second", lane="SAFE",
+        )
         result = aggregate_snapshots([
             {"with": first, "against": first},
             {"with": second, "against": second},
         ])
         encoded = to_jsonable(result)
         self.assertEqual(
-            encoded["against"]["1"]["POSITION_1"]["2"]["matchCount"], 20,
+            encoded["against"]["1"]["SAFE"]["2"]["matchCount"], 20,
         )
 
 
 class ValidationTests(unittest.TestCase):
     def test_missing_hero_is_rejected(self):
-        mode = parse_rows([_row(1, 2)], {"1", "2"}, description="test")
+        mode = parse_rows(
+            [_row(1, 2)], {"1", "2"}, description="test", lane="SAFE",
+        )
         with self.assertRaisesRegex(DataShapeError, "hero set differs"):
             validate_lane_data(
                 {"with": mode, "against": mode},
                 {"1", "2"},
+                expected_lanes={"SAFE"},
             )
 
     def test_report_counts_pairs_and_low_samples(self):
@@ -104,15 +141,30 @@ class ValidationTests(unittest.TestCase):
             [_row(1, 2), _row(2, 1)],
             {"1", "2"},
             description="test",
+            lane="SAFE",
         )
         report = validate_lane_data(
             {"with": mode, "against": mode},
             {"1", "2"},
+            expected_lanes={"SAFE"},
         )
         self.assertEqual(report.hero_count, 2)
         self.assertEqual(report.pair_count, 4)
         self.assertEqual(report.total_matches, 40)
         self.assertEqual(report.low_sample_pairs, 4)
+
+    def test_missing_requested_lane_is_rejected(self):
+        mode = parse_rows(
+            [_row(1, 2), _row(2, 1)],
+            {"1", "2"},
+            description="test",
+            lane="SAFE",
+        )
+        with self.assertRaisesRegex(DataShapeError, "missing requested lanes"):
+            validate_lane_data(
+                {"with": mode, "against": mode},
+                {"1", "2"},
+            )
 
 
 if __name__ == "__main__":
